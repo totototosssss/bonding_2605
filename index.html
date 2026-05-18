@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Bonding Optimizer 3D - Solid Three Edition</title>
+<title>Bonding Optimizer 3D - True 3D Routing</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
@@ -154,7 +154,7 @@ select, input[type=number] {
   <aside class="panel left">
     <div class="header">
       <div class="title">Bonding Optimizer 3D</div>
-      <div class="subtitle">Worker Edition / Custom Controls</div>
+      <div class="subtitle">Worker Edition / True 3D Routing</div>
     </div>
     <div class="body">
       <div class="section">
@@ -185,7 +185,7 @@ select, input[type=number] {
           <input id="tries" type="number" min="20" max="2000" step="10" value="160">
           <button class="btn primary" id="optimize">Optimize</button>
         </div>
-        <div class="small" style="margin-top:8px">探索回数を上げるほど良くなります。Web Worker版のため高負荷(500回以上)でもフリーズしません。</div>
+        <div class="small" style="margin-top:8px">3D空間の最短距離を判定します。高低差を利用した立体交差が可能です。</div>
       </div>
       <div class="section">
         <div class="label">Edit</div>
@@ -197,9 +197,9 @@ select, input[type=number] {
       <div class="section">
         <div class="label">Score</div>
         <div class="statgrid">
-          <div class="stat" id="sCross"><span>cross</span><b>-</b></div>
+          <div class="stat" id="sCross"><span>collide</span><b>-</b></div>
           <div class="stat" id="sCrit"><span>critical</span><b>-</b></div>
-          <div class="stat"><span>near</span><b id="sNear">-</b></div>
+          <div class="stat"><span>near 3D</span><b id="sNear">-</b></div>
           <div class="stat"><span>length</span><b id="sLen">-</b></div>
         </div>
       </div>
@@ -253,26 +253,48 @@ select, input[type=number] {
 
 const workerCode = `
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-const hypot = (a, b, c, d) => Math.hypot(a - c, b - d);
 
-function intersect(a, b, c, d) {
-  const den = (b.x - a.x) * (d.y - c.y) - (b.y - a.y) * (d.x - c.x);
-  if (Math.abs(den) < 1e-9) return false;
-  const u = ((c.x - a.x) * (d.y - c.y) - (c.y - a.y) * (d.x - c.x)) / den;
-  const v = ((c.x - a.x) * (b.y - a.y) - (c.y - a.y) * (b.x - a.x)) / den;
-  return u > 0.015 && u < 0.985 && v > 0.015 && v < 0.985;
-}
+function segDist3D(p1, p2, p3, p4) {
+  const u = {x: p2.x-p1.x, y: p2.y-p1.y, z: p2.z-p1.z};
+  const v = {x: p4.x-p3.x, y: p4.y-p3.y, z: p4.z-p3.z};
+  const w = {x: p1.x-p3.x, y: p1.y-p3.y, z: p1.z-p3.z};
+  const a = u.x*u.x + u.y*u.y + u.z*u.z;
+  const b = u.x*v.x + u.y*v.y + u.z*v.z;
+  const c = v.x*v.x + v.y*v.y + v.z*v.z;
+  const d = u.x*w.x + u.y*w.y + u.z*w.z;
+  const e = v.x*w.x + v.y*w.y + v.z*w.z;
+  const D = a*c - b*b;
+  let sc, sN, sD = D;
+  let tc, tN, tD = D;
 
-function pointSegDist(p, a, b) {
-  const vx = b.x - a.x, vy = b.y - a.y, l2 = vx * vx + vy * vy;
-  if (l2 < 1e-9) return Math.hypot(p.x - a.x, p.y - a.y);
-  let t = ((p.x - a.x) * vx + (p.y - a.y) * vy) / l2;
-  return Math.hypot(p.x - (a.x + clamp(t, 0, 1) * vx), p.y - (a.y + clamp(t, 0, 1) * vy));
-}
+  if (D < 1e-8) {
+    sN = 0.0; sD = 1.0; tN = e; tD = c;
+  } else {
+    sN = (b*e - c*d);
+    tN = (a*e - b*d);
+    if (sN < 0.0) { sN = 0.0; tN = e; tD = c; }
+    else if (sN > sD) { sN = sD; tN = e + b; tD = c; }
+  }
 
-function segDist(a, b, c, d) {
-  if (intersect(a, b, c, d)) return 0;
-  return Math.min(pointSegDist(a, c, d), pointSegDist(b, c, d), pointSegDist(c, a, b), pointSegDist(d, a, b));
+  if (tN < 0.0) {
+    tN = 0.0;
+    if (-d < 0.0) sN = 0.0;
+    else if (-d > a) sN = sD;
+    else { sN = -d; sD = a; }
+  } else if (tN > tD) {
+    tN = tD;
+    if ((-d + b) < 0.0) sN = 0;
+    else if ((-d + b) > a) sN = sD;
+    else { sN = (-d + b); sD = a; }
+  }
+
+  sc = (Math.abs(sN) < 1e-8 ? 0.0 : sN / sD);
+  tc = (Math.abs(tN) < 1e-8 ? 0.0 : tN / tD);
+
+  const dx = w.x + sc*u.x - tc*v.x;
+  const dy = w.y + sc*u.y - tc*v.y;
+  const dz = w.z + sc*u.z - tc*v.z;
+  return Math.sqrt(dx*dx + dy*dy + dz*dz);
 }
 
 function nearestOnPad(src, pad) {
@@ -314,7 +336,7 @@ class OptimizerWorker {
   }
   baseCost(pi, pa) {
     const pin = this.pins[pi], pad = this.pads[pa];
-    let c = hypot(pin.x, pin.y, pad.x, pad.y) * this.weights.len;
+    let c = Math.hypot(pin.x - pad.x, pin.y - pad.y) * this.weights.len;
     if ((pin.role === 'S' || pin.role === 'D') && pad.status !== 2) c += this.weights.rfMiss;
     if ((pin.role === 'S' || pin.role === 'D') && pad.status === 2) c -= 10000;
     return c;
@@ -372,7 +394,30 @@ class OptimizerWorker {
     return assign.map((pa, pi) => {
       if (pa < 0) return null;
       const pin = this.pins[pi], pad = this.pads[pa], end = nearestOnPad(pin, pad);
-      return { start: { x: pin.x, y: pin.y }, end, type: (pin.role === 'S' || pin.role === 'D') && pad.status === 2 ? 'RF' : 'Gate', role: pin.role, dev: pin.dev, pin: pin.index, pad: pad.lbl, padIndex: pad.orig, len: hypot(pin.x, pin.y, end.x, end.y) };
+      const len2D = Math.hypot(pin.x - end.x, pin.y - end.y);
+      
+      const pts = [];
+      const steps = 6;
+      const z0 = 0.47, z2 = 0.26;
+      const z1 = 0.55 + Math.min(1.65, 0.12 * len2D);
+      const cpZ = 2 * z1 - 0.5 * (z0 + z2);
+
+      let len3D = 0;
+      for (let i = 0; i <= steps; i++) {
+        const t = i / steps;
+        const mt = 1 - t;
+        const x = mt * pin.x + t * end.x;
+        const y = mt * pin.y + t * end.y;
+        const z = mt * mt * z0 + 2 * mt * t * cpZ + t * t * z2;
+        const pt = { x, y, z };
+        if (i > 0) {
+          const prev = pts[i-1];
+          len3D += Math.sqrt(Math.pow(pt.x - prev.x, 2) + Math.pow(pt.y - prev.y, 2) + Math.pow(pt.z - prev.z, 2));
+        }
+        pts.push(pt);
+      }
+      
+      return { start: { x: pin.x, y: pin.y }, end, type: (pin.role === 'S' || pin.role === 'D') && pad.status === 2 ? 'RF' : 'Gate', role: pin.role, dev: pin.dev, pin: pin.index, pad: pad.lbl, padIndex: pad.orig, len2D, len: len3D, pts };
     }).filter(Boolean);
   }
   evaluate(assign) {
@@ -390,8 +435,14 @@ class OptimizerWorker {
     for (let i = 0; i < lines.length; i++) {
       for (let j = i + 1; j < lines.length; j++) {
         const a = lines[i], b = lines[j]; if (a.dev === b.dev && a.pin === b.pin) continue;
-        const d = segDist(a.start, a.end, b.start, b.end);
-        if (d < 1e-6) cross++; else if (d < 0.33) near += (0.33 - d) ** 2;
+        let minD = Infinity;
+        for(let sa = 0; sa < a.pts.length - 1; sa++) {
+            for(let sb = 0; sb < b.pts.length - 1; sb++) {
+                const d = segDist3D(a.pts[sa], a.pts[sa+1], b.pts[sb], b.pts[sb+1]);
+                if (d < minD) minD = d;
+            }
+        }
+        if (minD < 0.05) cross++; else if (minD < 0.25) near += (0.25 - minD) ** 2;
       }
     }
     const devs = [...new Set(this.pins.map(p => p.dev))];
@@ -455,8 +506,7 @@ class ThreeView {
     if (!window.THREE) {
       this.el.innerHTML = `
         <div class="empty">
-          Three.js が読み込めていません。<br>
-          ネットワークまたはCDNを確認してください。
+          Three.js load error.
         </div>
       `;
       return;
@@ -823,7 +873,7 @@ class ThreeView {
       proposal.lines.forEach(l => {
         const midX = (l.start.x + l.end.x) / 2;
         const midY = (l.start.y + l.end.y) / 2;
-        const wireHeight = 0.55 + Math.min(1.65, 0.12 * l.len);
+        const wireHeight = 0.55 + Math.min(1.65, 0.12 * l.len2D);
 
         const curve = new THREE.CatmullRomCurve3([
           new THREE.Vector3(l.start.x, l.start.y, 0.47),
