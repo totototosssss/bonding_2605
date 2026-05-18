@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Bonding Optimizer 3D - Solid Native Edition</title>
+<title>Bonding Optimizer 3D - Solid Three Edition</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
@@ -154,7 +154,7 @@ select, input[type=number] {
   <aside class="panel left">
     <div class="header">
       <div class="title">Bonding Optimizer 3D</div>
-      <div class="subtitle">Solid Native Edition (No CDN / No WebGL)</div>
+      <div class="subtitle">Worker Edition / Custom Controls</div>
     </div>
     <div class="body">
       <div class="section">
@@ -185,7 +185,7 @@ select, input[type=number] {
           <input id="tries" type="number" min="20" max="2000" step="10" value="160">
           <button class="btn primary" id="optimize">Optimize</button>
         </div>
-        <div class="small" style="margin-top:8px">Web Worker + 完全ネイティブ処理。フリーズや読み込みエラーは一切発生しません。</div>
+        <div class="small" style="margin-top:8px">探索回数を上げるほど良くなります。Web Worker版のため高負荷(500回以上)でもフリーズしません。</div>
       </div>
       <div class="section">
         <div class="label">Edit</div>
@@ -210,7 +210,7 @@ select, input[type=number] {
     <div class="toolbar">
       <div class="tabs">
         <button class="btn active" id="tab2d">2D layout</button>
-        <button class="btn" id="tab3d">Pseudo 3D (Native)</button>
+        <button class="btn" id="tab3d">True 3D</button>
       </div>
       <div class="row">
         <span class="badge" id="modeBadge">2D</span>
@@ -219,7 +219,7 @@ select, input[type=number] {
     </div>
     <div class="view" id="view">
       <canvas id="view2d"></canvas>
-      <div id="view3d"></div> <!-- Canvas3DViewがここにcanvasを注入します -->
+      <div id="view3d"></div>
       <div class="toast" id="toast">Done</div>
       <div class="hint" id="hint">2D: drag devices/pads, wheel on pad changes size in Edit mode.<br>3D: drag = rotate, wheel = zoom, right drag = pan.</div>
     </div>
@@ -247,12 +247,10 @@ select, input[type=number] {
   </aside>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
 <script>
 'use strict';
 
-// ====================================================
-// Web Worker の定義 (別スレッド処理用)
-// ====================================================
 const workerCode = `
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const hypot = (a, b, c, d) => Math.hypot(a - c, b - d);
@@ -431,229 +429,437 @@ self.onmessage = function(e) {
 const blob = new Blob([workerCode], { type: 'application/javascript' });
 const WORKER_URL = URL.createObjectURL(blob);
 
-// ====================================================
-// 完全ネイティブ Canvas Pseudo-3D エンジン (Three.js代替)
-// ====================================================
-class Canvas3DView {
+class ThreeView {
   constructor(el) {
     this.el = el;
-    this.canvas = document.createElement('canvas');
-    this.canvas.style.width = '100%'; this.canvas.style.height = '100%'; this.canvas.style.display = 'block';
-    this.ctx = this.canvas.getContext('2d');
-    this.el.appendChild(this.canvas);
-    
-    // カメラパラメータ
-    this.cam = { rotZ: -Math.PI / 4, rotX: 1.0, zoom: 40, panX: 0, panY: 0 };
-    this.state = null;
-    this.proposal = null;
-    this.width = 0; this.height = 0;
+    this.ok = false;
 
-    this.bind();
-    this.resize();
+    this.scene = null;
+    this.camera = null;
+    this.renderer = null;
+    this.objects = [];
+
+    this.target = { x: 5.5, y: 5.5, z: 0.0 };
+    this.distance = 19.0;
+    this.yaw = -0.85;
+    this.pitch = 0.78;
+
+    this.dragging = false;
+    this.dragButton = 0;
+    this.lastMouse = { x: 0, y: 0 };
+
+    this.init();
   }
 
-  bind() {
-    let isDragging = false, btn = 0;
-    let startX, startY, sRotZ, sRotX, sPanX, sPanY;
+  init() {
+    if (!window.THREE) {
+      this.el.innerHTML = `
+        <div class="empty">
+          Three.js が読み込めていません。<br>
+          ネットワークまたはCDNを確認してください。
+        </div>
+      `;
+      return;
+    }
 
-    this.canvas.addEventListener('contextmenu', e => e.preventDefault());
-    this.canvas.addEventListener('mousedown', e => {
-      isDragging = true; btn = e.button;
-      startX = e.clientX; startY = e.clientY;
-      sRotZ = this.cam.rotZ; sRotX = this.cam.rotX; sPanX = this.cam.panX; sPanY = this.cam.panY;
+    this.scene = new THREE.Scene();
+    this.scene.background = new THREE.Color(0x020617);
+
+    this.camera = new THREE.PerspectiveCamera(42, 1, 0.1, 2000);
+
+    this.renderer = new THREE.WebGLRenderer({
+      antialias: true,
+      alpha: false
     });
 
-    window.addEventListener('mousemove', e => {
-      if (!isDragging) return;
-      const dx = e.clientX - startX, dy = e.clientY - startY;
-      if (btn === 2 || e.shiftKey) {
-        this.cam.panX = sPanX + dx; this.cam.panY = sPanY + dy;
-      } else {
-        this.cam.rotZ = sRotZ - dx * 0.01;
-        this.cam.rotX = Math.max(0.01, Math.min(Math.PI / 2, sRotX - dy * 0.01));
-      }
-      this.render();
-    });
-    window.addEventListener('mouseup', () => isDragging = false);
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    this.el.innerHTML = '';
+    this.el.appendChild(this.renderer.domElement);
 
-    this.canvas.addEventListener('wheel', e => {
+    const ambient = new THREE.AmbientLight(0xffffff, 0.72);
+    this.scene.add(ambient);
+
+    const key = new THREE.DirectionalLight(0xffffff, 1.25);
+    key.position.set(4, -7, 13);
+    this.scene.add(key);
+
+    const fill = new THREE.DirectionalLight(0x7dd3fc, 0.45);
+    fill.position.set(-10, 10, 8);
+    this.scene.add(fill);
+
+    this.bindControls();
+    this.ok = true;
+
+    this.resize();
+    this.updateCamera();
+    this.animate();
+  }
+
+  bindControls() {
+    const canvas = this.renderer.domElement;
+
+    canvas.addEventListener('contextmenu', e => {
       e.preventDefault();
-      this.cam.zoom *= (e.deltaY > 0 ? 0.9 : 1.1);
-      this.render();
     });
+
+    canvas.addEventListener('pointerdown', e => {
+      this.dragging = true;
+      this.dragButton = e.button;
+      this.lastMouse.x = e.clientX;
+      this.lastMouse.y = e.clientY;
+      canvas.setPointerCapture(e.pointerId);
+    });
+
+    canvas.addEventListener('pointermove', e => {
+      if (!this.dragging) return;
+
+      const dx = e.clientX - this.lastMouse.x;
+      const dy = e.clientY - this.lastMouse.y;
+      this.lastMouse.x = e.clientX;
+      this.lastMouse.y = e.clientY;
+
+      if (this.dragButton === 0) {
+        this.yaw -= dx * 0.006;
+        this.pitch += dy * 0.006;
+        this.pitch = Math.max(0.16, Math.min(1.42, this.pitch));
+      } else {
+        const panScale = this.distance * 0.0018;
+        const cosYaw = Math.cos(this.yaw);
+        const sinYaw = Math.sin(this.yaw);
+
+        const rightX = cosYaw;
+        const rightY = sinYaw;
+
+        const upX = -sinYaw;
+        const upY = cosYaw;
+
+        this.target.x -= dx * panScale * rightX;
+        this.target.y -= dx * panScale * rightY;
+        this.target.x += dy * panScale * upX;
+        this.target.y += dy * panScale * upY;
+      }
+
+      this.updateCamera();
+    });
+
+    canvas.addEventListener('pointerup', e => {
+      this.dragging = false;
+      try {
+        canvas.releasePointerCapture(e.pointerId);
+      } catch (_) {}
+    });
+
+    canvas.addEventListener('wheel', e => {
+      e.preventDefault();
+
+      const factor = e.deltaY > 0 ? 1.08 : 0.92;
+      this.distance *= factor;
+      this.distance = Math.max(5.5, Math.min(55.0, this.distance));
+
+      this.updateCamera();
+    }, { passive: false });
+  }
+
+  updateCamera() {
+    if (!this.camera) return;
+
+    const r = this.distance;
+    const cp = Math.cos(this.pitch);
+    const sp = Math.sin(this.pitch);
+    const cy = Math.cos(this.yaw);
+    const sy = Math.sin(this.yaw);
+
+    const x = this.target.x + r * cp * cy;
+    const y = this.target.y + r * cp * sy;
+    const z = this.target.z + r * sp;
+
+    this.camera.position.set(x, y, z);
+    this.camera.up.set(0, 0, 1);
+    this.camera.lookAt(this.target.x, this.target.y, this.target.z);
   }
 
   resize() {
+    if (!this.ok) return;
+
     const r = this.el.getBoundingClientRect();
-    if(r.width === 0) return;
-    this.canvas.width = r.width * devicePixelRatio;
-    this.canvas.height = r.height * devicePixelRatio;
-    this.ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
-    this.width = r.width; this.height = r.height;
-    this.render();
+    const w = Math.max(1, r.width);
+    const h = Math.max(1, r.height);
+
+    this.renderer.setSize(w, h, false);
+    this.camera.aspect = w / h;
+    this.camera.updateProjectionMatrix();
+    this.updateCamera();
+  }
+
+  clear() {
+    if (!this.ok) return;
+
+    for (const obj of this.objects) {
+      this.scene.remove(obj);
+
+      obj.traverse?.(child => {
+        if (child.geometry) child.geometry.dispose();
+
+        if (child.material) {
+          const mats = Array.isArray(child.material) ? child.material : [child.material];
+          mats.forEach(m => {
+            if (m.map) m.map.dispose();
+            m.dispose?.();
+          });
+        }
+      });
+    }
+
+    this.objects = [];
+  }
+
+  add(obj) {
+    this.scene.add(obj);
+    this.objects.push(obj);
+    return obj;
+  }
+
+  mat(color, roughness = 0.55, metalness = 0.04) {
+    return new THREE.MeshStandardMaterial({
+      color: new THREE.Color(color),
+      roughness,
+      metalness
+    });
+  }
+
+  lineMat(color) {
+    return new THREE.MeshStandardMaterial({
+      color: new THREE.Color(color),
+      roughness: 0.28,
+      metalness: 0.38,
+      emissive: new THREE.Color(color),
+      emissiveIntensity: 0.10
+    });
+  }
+
+  addTextSprite(text, x, y, z, color = '#ffffff', scale = 0.42) {
+    const canvas = document.createElement('canvas');
+    const size = 256;
+    canvas.width = size;
+    canvas.height = size;
+
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, size, size);
+
+    ctx.fillStyle = 'rgba(2, 6, 23, 0.62)';
+    ctx.strokeStyle = 'rgba(255,255,255,0.28)';
+    ctx.lineWidth = 6;
+
+    const rr = 36;
+    ctx.beginPath();
+    ctx.moveTo(rr, 48);
+    ctx.lineTo(size - rr, 48);
+    ctx.quadraticCurveTo(size - 48, 48, size - 48, rr);
+    ctx.lineTo(size - 48, size - rr);
+    ctx.quadraticCurveTo(size - 48, size - 48, size - rr, size - 48);
+    ctx.lineTo(rr, size - 48);
+    ctx.quadraticCurveTo(48, size - 48, 48, size - rr);
+    ctx.lineTo(48, rr);
+    ctx.quadraticCurveTo(48, 48, rr, 48);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = color;
+    ctx.font = '700 78px JetBrains Mono, monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(String(text), size / 2, size / 2 + 5);
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+
+    const material = new THREE.SpriteMaterial({
+      map: texture,
+      transparent: true,
+      depthWrite: false
+    });
+
+    const sprite = new THREE.Sprite(material);
+    sprite.position.set(x, y, z);
+    sprite.scale.set(scale, scale, scale);
+    this.add(sprite);
+
+    return sprite;
+  }
+
+  addGround() {
+    const boardGeo = new THREE.BoxGeometry(12.8, 12.8, 0.05);
+    const boardMat = this.mat('#0f172a', 0.82, 0.02);
+    const board = new THREE.Mesh(boardGeo, boardMat);
+    board.position.set(5.5, 5.5, -0.055);
+    this.add(board);
+
+    const edgeGeo = new THREE.EdgesGeometry(boardGeo);
+    const edgeMat = new THREE.LineBasicMaterial({ color: 0x64748b });
+    const edge = new THREE.LineSegments(edgeGeo, edgeMat);
+    edge.position.copy(board.position);
+    this.add(edge);
+
+    const gridGroup = new THREE.Group();
+
+    const lineMat = new THREE.LineBasicMaterial({
+      color: 0x334155,
+      transparent: true,
+      opacity: 0.72
+    });
+
+    for (let i = 0; i < 12; i++) {
+      const gx = new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(i, 0, 0.01),
+        new THREE.Vector3(i, 11, 0.01)
+      ]);
+      const gy = new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(0, i, 0.01),
+        new THREE.Vector3(11, i, 0.01)
+      ]);
+
+      gridGroup.add(new THREE.Line(gx, lineMat));
+      gridGroup.add(new THREE.Line(gy, lineMat));
+    }
+
+    this.add(gridGroup);
   }
 
   renderState(state, proposal) {
-    this.state = state; this.proposal = proposal;
-    this.render();
-  }
+    if (!this.ok) return;
 
-  // 3D空間(z上がプラス)から2Dスクリーン座標への投影計算
-  project(p) {
-    let dx = p.x - 5.5, dy = p.y - 5.5, dz = p.z;
-    
-    // Y軸(Z)回転
-    let cz = Math.cos(this.cam.rotZ), sz = Math.sin(this.cam.rotZ);
-    let tx = dx * cz - dy * sz;
-    let ty = dx * sz + dy * cz;
-    
-    // X軸(ピッチ)回転
-    let cx = Math.cos(this.cam.rotX), sx = Math.sin(this.cam.rotX);
-    let tz = ty * sx + dz * cx; // 深度(奥に行くほどマイナス？ -> ここではtzが大きいほど手前)
-    ty = ty * cx - dz * sx;
+    this.clear();
+    this.addGround();
 
-    return {
-      x: this.width / 2 + tx * this.cam.zoom + this.cam.panX,
-      y: this.height / 2 - ty * this.cam.zoom + this.cam.panY,
-      depth: tz
-    };
-  }
+    const chipMat = this.mat('#475569', 0.62, 0.08);
+    const chipEdgeMat = new THREE.LineBasicMaterial({ color: 0xcbd5e1 });
 
-  // HEXカラーを明るく/暗くして疑似ライティングを作る
-  lighten(color, factor) {
-    if(!color.startsWith('#')) return color;
-    let r = parseInt(color.slice(1,3), 16), g = parseInt(color.slice(3,5), 16), b = parseInt(color.slice(5,7), 16);
-    r = Math.min(255, Math.floor(r * factor)); g = Math.min(255, Math.floor(g * factor)); b = Math.min(255, Math.floor(b * factor));
-    return '#' + [r, g, b].map(x => x.toString(16).padStart(2, '0')).join('');
-  }
-
-  // ワイヤーボンディングの3Dカーブ計算 (放物線)
-  getArcPoint(start, end, zApex, t) {
-    const zStart = 0.35, zEnd = 0.1; 
-    const baseZ = zStart * (1 - t) + zEnd * t;
-    const arcZ = Math.sin(t * Math.PI) * (zApex - Math.max(zStart, zEnd));
-    return {
-      x: start.x + (end.x - start.x) * t,
-      y: start.y + (end.y - start.y) * t,
-      z: baseZ + arcZ
-    };
-  }
-
-  // 直方体の生成
-  addBox(items, cx, cy, w, h, z1, z2, fill, stroke) {
-    const dx = w / 2, dy = h / 2;
-    const p = [
-      {x: cx-dx, y: cy-dy, z: z1}, {x: cx+dx, y: cy-dy, z: z1}, {x: cx+dx, y: cy+dy, z: z1}, {x: cx-dx, y: cy+dy, z: z1},
-      {x: cx-dx, y: cy-dy, z: z2}, {x: cx+dx, y: cy-dy, z: z2}, {x: cx+dx, y: cy+dy, z: z2}, {x: cx-dx, y: cy+dy, z: z2}
+    const padMats = [
+      this.mat('#34d399', 0.46, 0.12),
+      this.mat('#fb7185', 0.52, 0.08),
+      this.mat('#38bdf8', 0.36, 0.22)
     ];
-    items.push({ type: 'poly', pts: [p[3], p[2], p[1], p[0]], fill, stroke: null }); // 底
-    items.push({ type: 'poly', pts: [p[4], p[5], p[6], p[7]], fill: this.lighten(fill, 1.25), stroke }); // トップ
-    items.push({ type: 'poly', pts: [p[0], p[1], p[5], p[4]], fill: this.lighten(fill, 0.8), stroke }); // 側面
-    items.push({ type: 'poly', pts: [p[1], p[2], p[6], p[5]], fill: this.lighten(fill, 0.95), stroke });
-    items.push({ type: 'poly', pts: [p[2], p[3], p[7], p[6]], fill: this.lighten(fill, 0.7), stroke });
-    items.push({ type: 'poly', pts: [p[3], p[0], p[4], p[7]], fill: this.lighten(fill, 0.85), stroke });
-  }
 
-  // 円柱の生成
-  addCylinder(items, cx, cy, r, z1, z2, fill, stroke) {
-    const segs = 14, topPts = [], botPts = [];
-    for(let i=0; i<segs; i++) {
-      const a = (i / segs) * Math.PI * 2;
-      const px = cx + Math.cos(a)*r, py = cy + Math.sin(a)*r;
-      botPts.push({x: px, y: py, z: z1}); topPts.push({x: px, y: py, z: z2});
-    }
-    items.push({ type: 'poly', pts: botPts.slice().reverse(), fill, stroke: null }); // 底
-    items.push({ type: 'poly', pts: topPts, fill: this.lighten(fill, 1.25), stroke }); // トップ
-    for(let i=0; i<segs; i++) {
-      const p1 = botPts[i], p2 = botPts[(i+1)%segs], p3 = topPts[(i+1)%segs], p4 = topPts[i];
-      items.push({ type: 'poly', pts: [p1, p2, p3, p4], fill: this.lighten(fill, 0.9), stroke: null });
-    }
-  }
+    state.pads.forEach((p, i) => {
+      const st = state.padSt[i];
+      let mesh;
 
-  render() {
-    if (!this.state || this.width === 0) return;
-    this.ctx.clearRect(0, 0, this.width, this.height);
-    let items = [];
+      if (p.shape === 'rect') {
+        const geo = new THREE.BoxGeometry(p.w, p.h, 0.13);
+        mesh = new THREE.Mesh(geo, padMats[st]);
+        mesh.position.set(p.x, p.y, 0.065);
+      } else {
+        const radius = Math.max(0.05, p.w / 2);
+        const geo = new THREE.CylinderGeometry(radius, radius, 0.13, 40);
+        mesh = new THREE.Mesh(geo, padMats[st]);
+        mesh.rotation.x = Math.PI / 2;
+        mesh.position.set(p.x, p.y, 0.065);
+      }
 
-    // Grid (Z=0)
-    for (let i = 0; i <= 11; i++) {
-      items.push({ type: 'line', pts: [{x:i, y:0, z:0}, {x:i, y:11, z:0}], color: '#1e293b', width: 1.5 });
-      items.push({ type: 'line', pts: [{x:0, y:i, z:0}, {x:11, y:i, z:0}], color: '#1e293b', width: 1.5 });
-    }
+      this.add(mesh);
 
-    // Pads
-    const padColors = ['#34d399', '#fb7185', '#38bdf8'];
-    this.state.pads.forEach((p, i) => {
-      let c = padColors[this.state.padSt[i]];
-      if (p.shape === 'rect') this.addBox(items, p.x, p.y, p.w, p.h, 0, 0.1, c, '#1e293b');
-      else this.addCylinder(items, p.x, p.y, p.w/2, 0, 0.1, c, '#1e293b');
-    });
-
-    // Devices & Pins
-    this.state.devices.forEach((d, di) => {
-      if (!this.state.active[di]) return;
-      this.addBox(items, d.pos.x, d.pos.y, d.w, d.h, 0, 0.25, '#475569', '#1e293b');
-      d.absPins().forEach(pin => {
-        if (!pin.active) return;
-        const pc = (pin.role === 'S' || pin.role === 'D') ? '#38bdf8' : '#fbbf24';
-        this.addCylinder(items, pin.x, pin.y, 0.12, 0.25, 0.35, pc, '#07111f');
-      });
-    });
-
-    // Wires
-    if (this.proposal) {
-      this.proposal.lines.forEach(l => {
-        const zApex = 0.45 + Math.min(1.2, l.len * 0.12);
-        const c = l.type === 'RF' ? '#38bdf8' : '#f59e0b', w = l.type === 'RF' ? 3.5 : 2.5;
-        const segments = 12;
-        for(let i=0; i<segments; i++) {
-          let p1 = this.getArcPoint(l.start, l.end, zApex, i / segments);
-          let p2 = this.getArcPoint(l.start, l.end, zApex, (i + 1) / segments);
-          items.push({ type: 'line', pts: [p1, p2], color: c, width: w });
-        }
-      });
-    }
-
-    // パース計算とZソート (Painter's Algorithm)
-    items.forEach(item => {
-      item.proj = item.pts.map(p => this.project(p));
-      // アイテムの中心深度を計算
-      item.depth = item.proj.reduce((sum, p) => sum + p.depth, 0) / item.proj.length;
-    });
-    // 深度が小さい(奥にある)ものから順に描画
-    items.sort((a, b) => a.depth - b.depth);
-
-    // 描画実行
-    items.forEach(item => {
-      if (item.type === 'line') {
-        this.ctx.beginPath();
-        this.ctx.moveTo(item.proj[0].x, item.proj[0].y);
-        this.ctx.lineTo(item.proj[1].x, item.proj[1].y);
-        this.ctx.strokeStyle = item.color;
-        this.ctx.lineWidth = item.width;
-        this.ctx.lineCap = 'round';
-        this.ctx.stroke();
-      } else if (item.type === 'poly') {
-        // バックフェース・カリング (裏を向いている面は描画しない)
-        if (item.proj.length >= 3) {
-          const ax = item.proj[1].x - item.proj[0].x, ay = item.proj[1].y - item.proj[0].y;
-          const bx = item.proj[2].x - item.proj[1].x, by = item.proj[2].y - item.proj[1].y;
-          if (ax * by - ay * bx < 0) return; 
-        }
-        this.ctx.beginPath();
-        this.ctx.moveTo(item.proj[0].x, item.proj[0].y);
-        for(let i=1; i<item.proj.length; i++) this.ctx.lineTo(item.proj[i].x, item.proj[i].y);
-        this.ctx.closePath();
-        if (item.fill) { this.ctx.fillStyle = item.fill; this.ctx.fill(); }
-        if (item.stroke) { this.ctx.strokeStyle = item.stroke; this.ctx.lineWidth = 1; this.ctx.stroke(); }
+      if (p.lbl !== 404) {
+        this.addTextSprite(
+          p.lbl,
+          p.x,
+          p.y,
+          0.42,
+          st === 2 ? '#e0f2fe' : '#ffffff',
+          0.42
+        );
       }
     });
+
+    state.devices.forEach((d, di) => {
+      if (!state.active[di]) return;
+
+      const chipGeo = new THREE.BoxGeometry(d.w, d.h, 0.18);
+      const chip = new THREE.Mesh(chipGeo, chipMat);
+      chip.position.set(d.pos.x, d.pos.y, 0.18);
+      this.add(chip);
+
+      const chipEdges = new THREE.LineSegments(
+        new THREE.EdgesGeometry(chipGeo),
+        chipEdgeMat
+      );
+      chipEdges.position.copy(chip.position);
+      this.add(chipEdges);
+
+      this.addTextSprite(d.name, d.pos.x, d.pos.y, 0.65, '#dbeafe', 0.55);
+
+      d.absPins().forEach(pin => {
+        if (!pin.active) {
+          const xMat = new THREE.LineBasicMaterial({ color: 0xfb7185 });
+          const g1 = new THREE.BufferGeometry().setFromPoints([
+            new THREE.Vector3(pin.x - 0.12, pin.y - 0.12, 0.42),
+            new THREE.Vector3(pin.x + 0.12, pin.y + 0.12, 0.42)
+          ]);
+          const g2 = new THREE.BufferGeometry().setFromPoints([
+            new THREE.Vector3(pin.x + 0.12, pin.y - 0.12, 0.42),
+            new THREE.Vector3(pin.x - 0.12, pin.y + 0.12, 0.42)
+          ]);
+          this.add(new THREE.Line(g1, xMat));
+          this.add(new THREE.Line(g2, xMat));
+          return;
+        }
+
+        const isRF = pin.role === 'S' || pin.role === 'D';
+        const pinMat = this.mat(isRF ? '#38bdf8' : '#fbbf24', 0.38, 0.22);
+        const sphere = new THREE.Mesh(
+          new THREE.SphereGeometry(isRF ? 0.13 : 0.105, 24, 12),
+          pinMat
+        );
+
+        sphere.position.set(pin.x, pin.y, 0.42);
+        this.add(sphere);
+
+        this.addTextSprite(pin.role, pin.x, pin.y, 0.70, '#ffffff', 0.28);
+      });
+    });
+
+    if (proposal && proposal.lines) {
+      proposal.lines.forEach(l => {
+        const midX = (l.start.x + l.end.x) / 2;
+        const midY = (l.start.y + l.end.y) / 2;
+        const wireHeight = 0.55 + Math.min(1.65, 0.12 * l.len);
+
+        const curve = new THREE.CatmullRomCurve3([
+          new THREE.Vector3(l.start.x, l.start.y, 0.47),
+          new THREE.Vector3(midX, midY, wireHeight),
+          new THREE.Vector3(l.end.x, l.end.y, 0.26)
+        ]);
+
+        const tubeGeo = new THREE.TubeGeometry(
+          curve,
+          48,
+          l.type === 'RF' ? 0.035 : 0.025,
+          12,
+          false
+        );
+
+        const tubeMat = this.lineMat(l.type === 'RF' ? '#38bdf8' : '#f59e0b');
+        const tube = new THREE.Mesh(tubeGeo, tubeMat);
+        this.add(tube);
+
+        const endDot = new THREE.Mesh(
+          new THREE.SphereGeometry(0.055, 16, 8),
+          this.mat('#ffffff', 0.25, 0.10)
+        );
+        endDot.position.set(l.end.x, l.end.y, 0.28);
+        this.add(endDot);
+      });
+    }
+  }
+
+  animate() {
+    if (!this.ok) return;
+    requestAnimationFrame(() => this.animate());
+    this.renderer.render(this.scene, this.camera);
   }
 }
 
-// ====================================================
-// メインUIロジック
-// ====================================================
 const GRID = 12;
 const SIDE_ORDER = ['TOP', 'RIGHT', 'BOTTOM', 'LEFT'];
 const RODS = {
@@ -689,7 +895,7 @@ class Device {
 class App {
   constructor() {
     this.c2 = document.getElementById('view2d'); this.ctx = this.c2.getContext('2d');
-    this.three = new Canvas3DView(document.getElementById('view3d'));
+    this.three = new ThreeView(document.getElementById('view3d'));
     this.scale = 50; this.offset = { x: 0, y: 0 }; this.viewMode = '2d'; this.editPads = false;
     this.drag = null; this.proposals = []; this.proposalIndex = 0; this.worker = null;
     this.state = {
@@ -744,7 +950,7 @@ class App {
     document.getElementById('view3d').style.display = v === '3d' ? 'block' : 'none';
     document.getElementById('tab2d').classList.toggle('active', v === '2d');
     document.getElementById('tab3d').classList.toggle('active', v === '3d');
-    document.getElementById('modeBadge').textContent = v === '2d' ? '2D' : 'Pseudo 3D';
+    document.getElementById('modeBadge').textContent = v === '2d' ? '2D' : 'True 3D';
     if(v === '3d') {
         this.three.resize(); this.render3d();
     }
